@@ -1,0 +1,2 @@
+# ESP8266_Leitura_2_Sensores_DS18B20_OTA
+Mesmo do ESP8266_Leitura_2_Sensores_DS18B20, agora com OTA
