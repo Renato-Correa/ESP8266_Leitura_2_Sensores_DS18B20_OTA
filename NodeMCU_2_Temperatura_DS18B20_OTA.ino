@@ -4,6 +4,7 @@
  * SUMARIO DO PROJETO.:                                      *
  * LEITURA DE 2 SENSORES DE TEMPERATURAS INTERNO E EXTERNO   *
  * USANDO O SENSORES DS18B20 COM OTA                         *
+ * USANDO MQTT 192.168.0.18:1883 sys/temp                    *
  * ----------------------------------------------------------*
  * CLIENTE.:   Prototipo                                     *
  * AUTOR  .:   Renato Correa                                 *
@@ -13,17 +14,17 @@
  * Versoes.:                                                 *
  * VER  |DESCRICAO                            | DATA         *
  *  0.00|INICIAL                              | 20251128     *
+ *  1.50|Ativacao MQTT                        | 20251201     *
  *                                                           *
  *                                                           *
  * Portas utilizadas (SAIDAS).:                              *
  * LED IN BUILD                                              *
  *                                                           *
- * Portas utilizadas (ENTRADAS).:                            *
+ * Portas utilizadas (ENTRADAS).:2  SENSORES DS18B20         *
  * D4 - GPIO2                                                *
  *                                                           * 
  * OBS.:                                                     *
- *  O CODIGO RELATIVO AO MQTT ESTA COMENTADO, DEVENDO        *
- *  DESCOMENTAR QUANDO USAR O BROKER                         *
+ *                                                           *
  *                                                           *
  *                                                           *
  *************************************************************/
@@ -40,15 +41,17 @@
 ESP8266WebServer server(80);
 ESP8266HTTPUpdateServer httpUpdater;
 
+
 // ---------------- CONFIGURAÇÕES ----------------
+bool mqttOnline  = false;
 const char* ssid = "RLC3G";
 const char* password = "yasrlc12";
 
-const char* mqtt_server = "BROKER_MQTT_IP";
+const char* mqtt_server = "192.168.0.18";
 const int   mqtt_port   = 1883;
 
 WiFiClient espClient;
-//PubSubClient mqtt(espClient);
+PubSubClient mqtt(espClient);
 
 
 
@@ -112,7 +115,8 @@ String getTemperaturasJSON() {
     String json = "{";
     json += "\"temperatura_interna\": " + String(tempInt, 2) + ",";
     json += "\"temperatura_externa\": " + String(tempExt, 2) + ",";
-    json += "\"datetime\": \"" + getDateTime() + "\"";
+     json += "\"datetime\": \"" + getDateTime() + "\",";
+    json += "\"mqtt_online\": " + String(mqttOnline ? "true" : "false");
     json += "}";
 
     return json;
@@ -177,17 +181,30 @@ function atualizar(){
         document.getElementById("tempInterna").innerHTML = d.temperatura_interna + " °C";
         document.getElementById("tempExterna").innerHTML = d.temperatura_externa + " °C";
         document.getElementById("datahora").innerHTML = d.datetime;
+
+        // 👉 ATUALIZA O STATUS DO MQTT (ADICIONE AQUI)
+        let status = document.getElementById("statusMQTT");
+
+        if (d.mqtt_online) {
+            status.innerHTML = "🟢 MQTT ONLINE";
+            status.style.color = "green";
+        } else {
+            status.innerHTML = "🔴 MQTT OFFLINE";
+            status.style.color = "red";
+        }
+
     });
 }
-setInterval(atualizar, 3000);
+setInterval(atualizar, 5000);
 </script>
 
 </head>
 
 <body onload="atualizar()">
 <h1>🌡 Monitor de Temperatura</h1>
-<h3>✨ By Renato [RLC]</h3>
+<h3>✨ By Renato [RLC] - Ver. 2025-12-01</h3>
 <h4>🚨 Termometro usando tambem MQTT 🚨</h4>
+<h5>[💥 192.168.0.18:1883 ❗ Topico: sys/temp ]</h5>
 
 <div class="card">
     <div class="label">Temperatura Interna 🌡</div>
@@ -200,7 +217,12 @@ setInterval(atualizar, 3000);
     <div id="datahora" class="datahora">--</div>
 </div>
 
-<p>Atualiza automaticamente a cada 3 segundos.</p>
+<div id="statusMQTT" 
+     style="margin:20px; font-size:1.1rem; font-weight:bold;">
+     Verificando MQTT...
+</div>
+
+<p>Atualiza automaticamente a cada 5 segundos.</p>
 
 </body>
 </html>
@@ -223,16 +245,25 @@ void handleJSON() {
 
 // ---------------- MQTT ----------------
 
-// void reconnectMQTT() {
-//     while (!mqtt.connected()) {
-//         if (mqtt.connect("NodeMCU_Temperaturas")) {
-//             Serial.println("MQTT conectado.");
-//         } else {
-//             Serial.print(".");
-//             delay(2000);
-//         }
-//     }
-// }
+unsigned long lastMQTTAttempt = 0;
+
+void tryConnectMQTT() {
+    if (mqtt.connected()) return;
+
+    unsigned long now = millis();
+    if (now - lastMQTTAttempt < 20000) return;  // tenta conectar a cada 20s
+
+    lastMQTTAttempt = now;
+
+    Serial.print("Tentando conectar ao MQTT... ");
+    if (mqtt.connect("NodeMCU_Temperaturas")) {
+        Serial.println("OK!");
+        mqttOnline = true;   // broker online
+    } else {
+        Serial.println("Falhou (broker offline).");
+        mqttOnline = false;  // broker offline
+    }
+}
 
 
 // ---------------- SETUP ----------------
@@ -280,7 +311,7 @@ void setup() {
     timeClient.update();
 
     // MQTT
-    //mqtt.setServer(mqtt_server, mqtt_port);
+    mqtt.setServer(mqtt_server, mqtt_port);
 }
 
 
@@ -291,16 +322,26 @@ void loop() {
     server.handleClient();
     timeClient.update();
 
-    //if (!mqtt.connected()) reconnectMQTT();
-    //mqtt.loop();
+    // tenta conectar sem travar
+    tryConnectMQTT();
 
-    // Enviar MQTT a cada 5 segundos
+    if (mqtt.connected()) {
+        mqtt.loop();
+    }
+
+    // Envio MQTT a cada 5 segundos
     unsigned long now = millis();
     if (now - lastSend >= interval) {
         lastSend = now;
         String payload = getTemperaturasJSON();
-        //mqtt.publish("casa/temperaturas", payload.c_str());
-        Serial.println("MQTT enviado: " + payload);
+        Serial.println("LEITURA: " + payload);
+
+        if (mqtt.connected()) {
+            mqtt.publish("sys/temp", payload.c_str());
+            Serial.println("MQTT enviado: " + payload);
+        } else {
+            Serial.println("MQTT OFFLINE – envio ignorado");
+        }
     }
 }
 
